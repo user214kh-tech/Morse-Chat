@@ -1,178 +1,107 @@
--- Catbar's Morse Code GUI
--- Morse tab: sends morse in chat
--- Body Morse tab: JUMP = dot | SIT = dash
--- NO CHAT used for body morse. Uses Humanoid state events only.
+-- Catbar Morse Code GUI
+-- Body Morse: LAY = dot | SIT = dash
+-- Send button ONLY, Enter does nothing
 
-local Players         = game:GetService("Players")
+local Players = game:GetService("Players")
 local TextChatService = game:GetService("TextChatService")
-local player          = Players.LocalPlayer
+local player = Players.LocalPlayer
 
--- MORSE TABLE
-local MORSE = {
-    A=".-",B="-...",C="-.-.",D="-..",E=".",
-    F="..-.",G="--.",H="....",I="..",J=".---",
-    K="-.-",L=".-..",M="--",N="-.",O="---",
-    P=".--.",Q="--.-",R=".-.",S="...",T="-",
-    U="..-",V="...-",W=".--",X="-..-",Y="-.--",Z="--..",
-    ["0"]="-----",["1"]=".----",["2"]="..---",
-    ["3"]="...--",["4"]="....-",["5"]=".....",
-    ["6"]="-.....",["7"]="--...",["8"]="---..",["9"]="----.",
-    [" "]="/",
-}
-local MORSE_DECODE={}
-for k,v in pairs(MORSE) do MORSE_DECODE[v]=k end
+local MORSE = {}
+MORSE.A=".-" MORSE.B="-..." MORSE.C="-.-." MORSE.D="-.."
+MORSE.E="." MORSE.F="..-." MORSE.G="--." MORSE.H="...."
+MORSE.I=".." MORSE.J=".---" MORSE.K="-.-" MORSE.L=".-.."
+MORSE.M="--" MORSE.N="-." MORSE.O="---" MORSE.P=".--."
+MORSE.Q="--.-" MORSE.R=".-." MORSE.S="..." MORSE.T="-"
+MORSE.U="..-" MORSE.V="...-" MORSE.W=".--" MORSE.X="-..-"
+MORSE.Y="-.--" MORSE.Z="--.."
+MORSE["0"]="-----" MORSE["1"]=".----" MORSE["2"]="..---"
+MORSE["3"]="...--" MORSE["4"]="....-" MORSE["5"]="....."
+MORSE["6"]="-....." MORSE["7"]="--..." MORSE["8"]="---.."
+MORSE["9"]="----." MORSE[" "]="/"
+
+local MORSE_DECODE = {}
+for k,v in pairs(MORSE) do MORSE_DECODE[v] = k end
 
 local function toMorse(text)
-    local out={}
-    for i=1,#text do out[#out+1]=MORSE[text:sub(i,i):upper()] or "?" end
-    return table.concat(out," ")
+    local out = {}
+    for i=1,#text do
+        local c = text:sub(i,i):upper()
+        out[#out+1] = MORSE[c] or "?"
+    end
+    return table.concat(out, " ")
 end
 
 local function fromMorse(str)
-    local out={}
+    local out = {}
     for w in str:gmatch("[^ ]+") do
-        if w=="/" then out[#out+1]=" "
-        elseif MORSE_DECODE[w] then out[#out+1]=MORSE_DECODE[w]:lower()
-        else out[#out+1]="?" end
+        if w == "/" then
+            out[#out+1] = " "
+        elseif MORSE_DECODE[w] then
+            out[#out+1] = MORSE_DECODE[w]:lower()
+        else
+            out[#out+1] = "?"
+        end
     end
     return table.concat(out)
 end
 
 local function looksLikeMorse(text)
-    local d=select(2,text:gsub("%.",""))
-    local h=select(2,text:gsub("%-",""))
-    local t=#text:gsub("%s","")
-    return t>0 and (d+h)/t>=0.5
+    local d = select(2, text:gsub("%.", ""))
+    local h = select(2, text:gsub("%-", ""))
+    local t = #text:gsub("%s", "")
+    return t > 0 and (d+h)/t >= 0.5
 end
 
--- TIMING
--- SIT is the key insight: players almost NEVER accidentally sit in normal gameplay
--- JUMP happens a lot, but only during active play
--- Solution: require a SIT to "arm" the decoder for that player
--- Once armed, jumps = dots and sits = dashes until message is done
--- This eliminates ALL false positives from random jumping
-
-local LTR_SILENCE = 2.0   -- seconds no input = letter done
-local MSG_SILENCE = 5.0   -- seconds no input = message done, flush
+local SYM_GAP = 0.55
+local LTR_GAP = 2.50
+local WRD_GAP = 3.50
+local R_LTR   = 1.6
+local R_WRD   = 3.8   -- increased to prevent unwanted word spaces between letters
+local R_MSG   = 6.0
 
 local addToLog
 local logFrame
 
--- =============================================
--- RECEIVER
--- Key design: decoder is ARMED by first sit
--- Before first sit: ignore all jumps (game noise)
--- After first sit: record jumps as dots, sits as dashes
--- After MSG_SILENCE: flush and DISARM
--- =============================================
 local function makeDecoder()
     return {
-        armed    = false,  -- becomes true after first sit
-        code     = "",
-        letters  = {},
-        lastSig  = 0,
-        lastMove = 0,
-        jCD      = false,
-        sCD      = false,
+        code="", letters={},
+        lastSig=0, lastMove=0,
+        layCD=false, sitCD=false,
     }
 end
 
-local function hookPlayer(p)
-    local function tryHook()
-        local char = p.Character or p.CharacterAdded:Wait()
-        local hum  = char:WaitForChild("Humanoid", 10)
-        if not hum then return end
-
-        local dec = makeDecoder()
-
-        -- polling: close letters, flush messages, disarm on long silence
-        task.spawn(function()
-            while hum and hum.Parent do
-                task.wait(0.2)
-                if not dec.armed then continue end
-                local now = tick()
-
-                -- close letter after silence
-                if dec.code ~= "" and (now - dec.lastSig) >= LTR_SILENCE then
-                    local d = MORSE_DECODE[dec.code]
-                    if d and d ~= " " then
-                        dec.letters[#dec.letters+1] = d:lower()
-                    end
-                    dec.code = ""
-                end
-
-                -- flush full message after long silence
-                if #dec.letters > 0 and (now - dec.lastMove) >= MSG_SILENCE then
-                    -- close any remaining code first
-                    if dec.code ~= "" then
-                        local d = MORSE_DECODE[dec.code]
-                        if d then dec.letters[#dec.letters+1] = d:lower() end
-                        dec.code = ""
-                    end
-                    local msg = table.concat(dec.letters)
-                    if msg ~= "" and addToLog then
-                        addToLog(p.Name, msg, false, true)
-                    end
-                    dec.letters = {}
-                    dec.armed   = false  -- disarm until next sit
-                end
-            end
-        end)
-
-        hum.StateChanged:Connect(function(_, new)
-            local now = tick()
-
-            -- SIT: arms the decoder AND records a dash
-            if new == Enum.HumanoidStateType.Seated and not dec.sCD then
-                dec.sCD = true
-                dec.armed = true  -- first sit arms it
-                dec.code  = dec.code .. "-"
-                dec.lastSig  = now
-                dec.lastMove = now
-                task.delay(1.2, function() dec.sCD = false end)
-            end
-
-            -- JUMP: only counts if decoder is already armed by a sit
-            if new == Enum.HumanoidStateType.Jumping and dec.armed and not dec.jCD then
-                dec.jCD = true
-                dec.code  = dec.code .. "."
-                dec.lastSig  = now
-                dec.lastMove = now
-                task.delay(0.8, function() dec.jCD = false end)
-            end
-        end)
-    end
-
-    task.spawn(tryHook)
-    p.CharacterAdded:Connect(function() task.spawn(tryHook) end)
-end
-
-for _, p in ipairs(Players:GetPlayers()) do
-    if p ~= player then hookPlayer(p) end
-end
-Players.PlayerAdded:Connect(function(p)
-    if p ~= player then hookPlayer(p) end
-end)
-
--- =============================================
 -- SENDER
--- =============================================
 local sendQueue = {}
 local busy = false
 
-local function getHum()
-    local c = player.Character or player.CharacterAdded:Wait()
-    return c:FindFirstChild("Humanoid")
+local function getChar()
+    return player.Character or player.CharacterAdded:Wait()
 end
 
-local function doJump()
-    local hum = getHum(); if not hum then return end
-    hum:ChangeState(Enum.HumanoidStateType.Jumping)
+local function doLay()
+    local char = getChar()
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return end
+    
+    hum.PlatformStand = true
+    root.CFrame = root.CFrame * CFrame.Angles(math.rad(90), 0, 0)
     task.wait(0.6)
+    hum.PlatformStand = false
+    
+    -- Fix flipping when standing back up
+    task.wait(0.1)
+    local cf = root.CFrame
+    local _, yaw, _ = cf:ToEulerAnglesXYZ()
+    root.CFrame = CFrame.new(cf.Position) * CFrame.Angles(0, yaw, 0)
+    
+    task.wait(0.2)
 end
 
 local function doSit()
-    local hum = getHum(); if not hum then return end
+    local char = getChar()
+    local hum  = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
     hum.Sit = true
     task.wait(0.7)
     hum.Sit = false
@@ -180,15 +109,19 @@ local function doSit()
 end
 
 local function runLetter(letter)
+    if letter == " " then
+        task.wait(WRD_GAP)
+        return
+    end
     local code = MORSE[letter:upper()]
-    if not code or code == "/" then task.wait(1.0); return end
+    if not code then task.wait(LTR_GAP); return end
     for i = 1, #code do
         local s = code:sub(i,i)
-        if s == "." then doJump()
+        if s == "." then doLay()
         elseif s == "-" then doSit() end
-        if i < #code then task.wait(0.2) end
+        if i < #code then task.wait(SYM_GAP) end
     end
-    task.wait(2.2)  -- clear letter gap — longer than LTR_SILENCE so receiver closes the letter
+    task.wait(LTR_GAP)
 end
 
 local function drainQueue()
@@ -201,31 +134,111 @@ local function drainQueue()
 end
 
 local function bodyMorseSend(text)
-    for i = 1, #text do sendQueue[#sendQueue+1] = text:sub(i,i) end
+    for i = 1, #text do
+        sendQueue[#sendQueue+1] = text:sub(i,i)
+    end
     task.spawn(drainQueue)
 end
 
--- =============================================
+-- RECEIVER (other players)
+local function hookPlayer(p)
+    local function tryHook()
+        local char = p.Character or p.CharacterAdded:Wait()
+        local hum  = char:WaitForChild("Humanoid", 10)
+        if not hum then return end
+        local dec = makeDecoder()
+
+        task.spawn(function()
+            while hum and hum.Parent do
+                task.wait(0.2)
+                local now = tick()
+
+                if dec.code ~= "" and dec.lastSig > 0 and (now - dec.lastSig) >= R_LTR then
+                    local d = MORSE_DECODE[dec.code]
+                    if d and d ~= " " then
+                        dec.letters[#dec.letters+1] = d:lower()
+                    end
+                    dec.code = ""
+                end
+
+                if #dec.letters > 0 and dec.lastMove > 0 and (now - dec.lastMove) >= R_MSG then
+                    if dec.code ~= "" then
+                        local d = MORSE_DECODE[dec.code]
+                        if d then dec.letters[#dec.letters+1] = d:lower() end
+                        dec.code = ""
+                    end
+                    while #dec.letters > 0 and dec.letters[#dec.letters] == " " do
+                        table.remove(dec.letters)
+                    end
+                    local msg = table.concat(dec.letters)
+                    if msg ~= "" and addToLog then
+                        addToLog(p.Name, msg, false, true)
+                    end
+                    dec.letters = {}
+                end
+            end
+        end)
+
+        local function checkWordGap()
+            local now = tick()
+            if #dec.letters > 0
+            and dec.letters[#dec.letters] ~= " "
+            and dec.lastMove > 0
+            and (now - dec.lastMove) >= R_WRD then
+                dec.letters[#dec.letters+1] = " "
+            end
+        end
+
+        hum:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+            if hum.PlatformStand == true and not dec.layCD then
+                dec.layCD = true
+                checkWordGap()
+                dec.code = dec.code .. "."
+                dec.lastSig = tick()
+                dec.lastMove = tick()
+                task.delay(0.8, function() dec.layCD = false end)
+            end
+        end)
+
+        hum.StateChanged:Connect(function(_, new)
+            if new == Enum.HumanoidStateType.Seated and not dec.sitCD then
+                dec.sitCD = true
+                checkWordGap()
+                dec.code = dec.code .. "-"
+                dec.lastSig = tick()
+                dec.lastMove = tick()
+                task.delay(1.2, function() dec.sitCD = false end)
+            end
+        end)
+    end
+    task.spawn(tryHook)
+    p.CharacterAdded:Connect(function() task.spawn(tryHook) end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= player then hookPlayer(p) end
+end
+Players.PlayerAdded:Connect(function(p)
+    if p ~= player then hookPlayer(p) end
+end)
+
 -- SELF WATCHER
--- Same armed logic as receiver — arms on first sit
--- =============================================
-local selfDec     = makeDecoder()
-local selfLabel   = nil
-local selfWatchOn = false
+local selfDec   = makeDecoder()
+local selfLabel = nil
+local selfOn    = false
 
 local function updateSelf()
     if not selfLabel then return end
-    local built = table.concat(selfDec.letters)
-    local inprog = selfDec.code ~= "" and (" ["..selfDec.code.."]") or ""
-    if not selfWatchOn then
+    local built  = table.concat(selfDec.letters)
+    local inprog = selfDec.code ~= "" and (" [" .. selfDec.code .. "]") or ""
+    if not selfOn then
         selfLabel.Text = string.format(
-            '<font color="#9B59B6">You 🕹️ (sent):</font>\n'..
-            '<font color="#aaaaaa"> 👁 they read: </font><font color="#E67E22">%s</font> <font color="#27AE60">✓</font>',
+            '<font color="#9B59B6">You (sent):</font>\n<font color="#aaaaaa"> they read: </font><font color="#E67E22">%s</font> <font color="#27AE60">checkmark</font>',
             built == "" and "?" or built)
+        selfLabel.Text = selfLabel.Text:gsub("checkmark", string.char(226,156,147))
     else
         selfLabel.Text = string.format(
-            '<font color="#9B59B6">You 🕹️ (sending...):</font>\n'..
-            '<font color="#aaaaaa"> 👁 they read: </font><font color="#E67E22">%s</font><font color="#aaaaaa">%s</font><font color="#FFAA00">▌</font>',
+            '<font color="#9B59B6">You (sending...):</font>\n<font color="#aaaaaa"> they read: </font><font color="#E67E22">%s%s</font><font color="#FFAA00">|</font>',
             built, inprog)
     end
     if logFrame then
@@ -236,11 +249,12 @@ local function updateSelf()
 end
 
 local function startSelfWatch()
-    selfDec       = makeDecoder()
-    selfWatchOn   = true
+    selfDec = makeDecoder()
+    selfOn  = true
 
     local f = Instance.new("Frame", logFrame)
-    f.Size = UDim2.new(1,-6,0,0); f.AutomaticSize = Enum.AutomaticSize.Y
+    f.Size = UDim2.new(1,-6,0,0)
+    f.AutomaticSize = Enum.AutomaticSize.Y
     f.BackgroundTransparency = 1
 
     selfLabel = Instance.new("TextLabel", f)
@@ -252,53 +266,61 @@ local function startSelfWatch()
     selfLabel.RichText = true
     selfLabel.Font = Enum.Font.Gotham
     selfLabel.TextSize = 13
-    selfLabel.Text =
-        '<font color="#9B59B6">You 🕹️ (sending...):</font>\n'..
-        '<font color="#aaaaaa"> 👁 they read: </font><font color="#FFAA00">⏳</font>'
+    selfLabel.Text = '<font color="#9B59B6">You (sending...):</font>\n<font color="#aaaaaa"> they read: </font><font color="#FFAA00">...</font>'
 
     task.defer(function()
         logFrame.CanvasPosition = Vector2.new(0, logFrame.AbsoluteCanvasSize.Y)
     end)
 end
 
--- hook self humanoid once, stays connected
 local function hookSelf()
     local char = player.Character or player.CharacterAdded:Wait()
     local hum  = char:WaitForChild("Humanoid", 10)
     if not hum then return end
 
-    hum.StateChanged:Connect(function(_, new)
-        if not selfWatchOn then return end
+    local function checkWordGapSelf()
         local now = tick()
-
-        if new == Enum.HumanoidStateType.Seated and not selfDec.sCD then
-            selfDec.sCD    = true
-            selfDec.armed  = true
-            selfDec.code   = selfDec.code .. "-"
-            selfDec.lastSig  = now
-            selfDec.lastMove = now
-            updateSelf()
-            task.delay(1.2, function() selfDec.sCD = false end)
+        if #selfDec.letters > 0
+        and selfDec.letters[#selfDec.letters] ~= " "
+        and selfDec.lastMove > 0
+        and (now - selfDec.lastMove) >= R_WRD then
+            selfDec.letters[#selfDec.letters+1] = " "
         end
+    end
 
-        if new == Enum.HumanoidStateType.Jumping and selfDec.armed and not selfDec.jCD then
-            selfDec.jCD    = true
-            selfDec.code   = selfDec.code .. "."
-            selfDec.lastSig  = now
-            selfDec.lastMove = now
+    hum:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+        if not selfOn then return end
+        if hum.PlatformStand == true and not selfDec.layCD then
+            selfDec.layCD = true
+            checkWordGapSelf()
+            selfDec.code = selfDec.code .. "."
+            selfDec.lastSig = tick()
+            selfDec.lastMove = tick()
             updateSelf()
-            task.delay(0.8, function() selfDec.jCD = false end)
+            task.delay(0.8, function() selfDec.layCD = false end)
         end
     end)
 
-    -- self polling
+    hum.StateChanged:Connect(function(_, new)
+        if not selfOn then return end
+        if new == Enum.HumanoidStateType.Seated and not selfDec.sitCD then
+            selfDec.sitCD = true
+            checkWordGapSelf()
+            selfDec.code = selfDec.code .. "-"
+            selfDec.lastSig = tick()
+            selfDec.lastMove = tick()
+            updateSelf()
+            task.delay(1.2, function() selfDec.sitCD = false end)
+        end
+    end)
+
     task.spawn(function()
         while true do
             task.wait(0.2)
-            if not selfWatchOn or not selfDec.armed then continue end
+            if not selfOn then continue end
             local now = tick()
 
-            if selfDec.code ~= "" and (now - selfDec.lastSig) >= LTR_SILENCE then
+            if selfDec.code ~= "" and selfDec.lastSig > 0 and (now - selfDec.lastSig) >= R_LTR then
                 local d = MORSE_DECODE[selfDec.code]
                 if d and d ~= " " then
                     selfDec.letters[#selfDec.letters+1] = d:lower()
@@ -307,14 +329,13 @@ local function hookSelf()
                 selfDec.code = ""
             end
 
-            if #selfDec.letters > 0 and (now - selfDec.lastMove) >= MSG_SILENCE then
+            if #selfDec.letters > 0 and selfDec.lastMove > 0 and (now - selfDec.lastMove) >= R_MSG then
                 if selfDec.code ~= "" then
                     local d = MORSE_DECODE[selfDec.code]
                     if d then selfDec.letters[#selfDec.letters+1] = d:lower() end
                     selfDec.code = ""
                 end
-                selfWatchOn      = false
-                selfDec.armed    = false
+                selfOn = false
                 updateSelf()
                 selfLabel = nil
             end
@@ -325,149 +346,202 @@ end
 task.spawn(hookSelf)
 player.CharacterAdded:Connect(function() task.spawn(hookSelf) end)
 
--- =============================================
--- GUI
--- =============================================
+-- GUI (unchanged)
 local sg = Instance.new("ScreenGui")
-sg.Name = "CatbarMorse"; sg.ResetOnSpawn = false
+sg.Name = "CatbarMorse"
+sg.ResetOnSpawn = false
 sg.Parent = player:WaitForChild("PlayerGui")
 
 local mf = Instance.new("Frame", sg)
-mf.Size = UDim2.new(0,220,0,290); mf.Position = UDim2.new(1,-240,0.25,0)
-mf.BackgroundColor3 = Color3.fromRGB(255,245,252); mf.BorderSizePixel = 0
-Instance.new("UICorner",mf).CornerRadius = UDim.new(0,14)
-local stroke = Instance.new("UIStroke",mf)
-stroke.Color = Color3.fromRGB(255,170,200); stroke.Thickness = 1.5
+mf.Size = UDim2.new(0,220,0,290)
+mf.Position = UDim2.new(1,-240,0.25,0)
+mf.BackgroundColor3 = Color3.fromRGB(255,245,252)
+mf.BorderSizePixel = 0
+Instance.new("UICorner", mf).CornerRadius = UDim.new(0,14)
+local stroke = Instance.new("UIStroke", mf)
+stroke.Color = Color3.fromRGB(255,170,200)
+stroke.Thickness = 1.5
 
-local tb = Instance.new("Frame",mf)
+local tb = Instance.new("Frame", mf)
 tb.Size = UDim2.new(1,0,0,30)
-tb.BackgroundColor3 = Color3.fromRGB(255,182,215); tb.BorderSizePixel = 0
-Instance.new("UICorner",tb).CornerRadius = UDim.new(0,14)
+tb.BackgroundColor3 = Color3.fromRGB(255,182,215)
+tb.BorderSizePixel = 0
+Instance.new("UICorner", tb).CornerRadius = UDim.new(0,14)
 
-local tl = Instance.new("TextLabel",tb)
-tl.Size = UDim2.new(1,-60,1,0); tl.BackgroundTransparency = 1
-tl.Text = "🌸Catbar's Morse Code🌸"; tl.TextColor3 = Color3.fromRGB(220,60,120)
-tl.Font = Enum.Font.GothamBold; tl.TextSize = 13
+local tl = Instance.new("TextLabel", tb)
+tl.Size = UDim2.new(1,-60,1,0)
+tl.BackgroundTransparency = 1
+tl.Text = "Catbar Morse Code"
+tl.TextColor3 = Color3.fromRGB(220,60,120)
+tl.Font = Enum.Font.GothamBold
+tl.TextSize = 13
 
-local hideBtn = Instance.new("TextButton",tb)
-hideBtn.Size = UDim2.new(0,24,0,24); hideBtn.Position = UDim2.new(1,-54,0,3)
-hideBtn.BackgroundTransparency = 1; hideBtn.Text = "▼"
+local hideBtn = Instance.new("TextButton", tb)
+hideBtn.Size = UDim2.new(0,24,0,24)
+hideBtn.Position = UDim2.new(1,-54,0,3)
+hideBtn.BackgroundTransparency = 1
+hideBtn.Text = "v"
 hideBtn.TextColor3 = Color3.fromRGB(220,60,120)
-hideBtn.Font = Enum.Font.GothamBold; hideBtn.TextSize = 16
+hideBtn.Font = Enum.Font.GothamBold
+hideBtn.TextSize = 16
 
-local closeBtn = Instance.new("TextButton",tb)
-closeBtn.Size = UDim2.new(0,24,0,24); closeBtn.Position = UDim2.new(1,-28,0,3)
-closeBtn.BackgroundTransparency = 1; closeBtn.Text = "✕"
+local closeBtn = Instance.new("TextButton", tb)
+closeBtn.Size = UDim2.new(0,24,0,24)
+closeBtn.Position = UDim2.new(1,-28,0,3)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = "X"
 closeBtn.TextColor3 = Color3.fromRGB(255,80,110)
-closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 16
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 16
 
-local mb = Instance.new("Frame",mf)
-mb.Size = UDim2.new(1,-12,0,24); mb.Position = UDim2.new(0,6,0,34)
-mb.BackgroundColor3 = Color3.fromRGB(255,230,243); mb.BorderSizePixel = 0
-Instance.new("UICorner",mb).CornerRadius = UDim.new(0,8)
+local mb = Instance.new("Frame", mf)
+mb.Size = UDim2.new(1,-12,0,24)
+mb.Position = UDim2.new(0,6,0,34)
+mb.BackgroundColor3 = Color3.fromRGB(255,230,243)
+mb.BorderSizePixel = 0
+Instance.new("UICorner", mb).CornerRadius = UDim.new(0,8)
 
-local morseTab = Instance.new("TextButton",mb)
-morseTab.Size = UDim2.new(0.5,-2,1,-4); morseTab.Position = UDim2.new(0,2,0,2)
-morseTab.BackgroundColor3 = Color3.fromRGB(255,130,175); morseTab.Text = "📡 Morse"
+local morseTab = Instance.new("TextButton", mb)
+morseTab.Size = UDim2.new(0.5,-2,1,-4)
+morseTab.Position = UDim2.new(0,2,0,2)
+morseTab.BackgroundColor3 = Color3.fromRGB(255,130,175)
+morseTab.Text = "Morse"
 morseTab.TextColor3 = Color3.new(1,1,1)
-morseTab.Font = Enum.Font.GothamBold; morseTab.TextSize = 11
-Instance.new("UICorner",morseTab).CornerRadius = UDim.new(0,6)
+morseTab.Font = Enum.Font.GothamBold
+morseTab.TextSize = 11
+Instance.new("UICorner", morseTab).CornerRadius = UDim.new(0,6)
 
-local bodyTab = Instance.new("TextButton",mb)
-bodyTab.Size = UDim2.new(0.5,-2,1,-4); bodyTab.Position = UDim2.new(0.5,0,0,2)
-bodyTab.BackgroundColor3 = Color3.fromRGB(220,200,230); bodyTab.Text = "🕹️ Body Morse"
+local bodyTab = Instance.new("TextButton", mb)
+bodyTab.Size = UDim2.new(0.5,-2,1,-4)
+bodyTab.Position = UDim2.new(0.5,0,0,2)
+bodyTab.BackgroundColor3 = Color3.fromRGB(220,200,230)
+bodyTab.Text = "Body Morse"
 bodyTab.TextColor3 = Color3.fromRGB(140,80,160)
-bodyTab.Font = Enum.Font.GothamBold; bodyTab.TextSize = 11
-Instance.new("UICorner",bodyTab).CornerRadius = UDim.new(0,6)
+bodyTab.Font = Enum.Font.GothamBold
+bodyTab.TextSize = 11
+Instance.new("UICorner", bodyTab).CornerRadius = UDim.new(0,6)
 
-logFrame = Instance.new("ScrollingFrame",mf)
-logFrame.Size = UDim2.new(1,-12,0,150); logFrame.Position = UDim2.new(0,6,0,62)
-logFrame.BackgroundColor3 = Color3.fromRGB(255,252,255); logFrame.BorderSizePixel = 0
+logFrame = Instance.new("ScrollingFrame", mf)
+logFrame.Size = UDim2.new(1,-12,0,150)
+logFrame.Position = UDim2.new(0,6,0,62)
+logFrame.BackgroundColor3 = Color3.fromRGB(255,252,255)
+logFrame.BorderSizePixel = 0
 logFrame.ScrollBarThickness = 4
 logFrame.ScrollBarImageColor3 = Color3.fromRGB(255,160,190)
 logFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
 logFrame.CanvasSize = UDim2.new(0,0,0,0)
-Instance.new("UICorner",logFrame).CornerRadius = UDim.new(0,10)
-local ll = Instance.new("UIListLayout",logFrame)
-ll.SortOrder = Enum.SortOrder.LayoutOrder; ll.Padding = UDim.new(0,4)
+Instance.new("UICorner", logFrame).CornerRadius = UDim.new(0,10)
+local ll = Instance.new("UIListLayout", logFrame)
+ll.SortOrder = Enum.SortOrder.LayoutOrder
+ll.Padding = UDim.new(0,4)
 
-local hint = Instance.new("TextLabel",mf)
-hint.Size = UDim2.new(1,-12,0,16); hint.Position = UDim2.new(0,6,0,216)
+local hint = Instance.new("TextLabel", mf)
+hint.Size = UDim2.new(1,-12,0,16)
+hint.Position = UDim2.new(0,6,0,216)
 hint.BackgroundTransparency = 1
-hint.Text = "🪑 Sit first to start · ⬆ Jump=dot · 🪑 Sit=dash"
+hint.Text = "Lay down = dot  |  Sit = dash"
 hint.TextColor3 = Color3.fromRGB(180,120,160)
-hint.Font = Enum.Font.Gotham; hint.TextSize = 10; hint.Visible = false
+hint.Font = Enum.Font.Gotham
+hint.TextSize = 10
+hint.Visible = false
 
-local inf = Instance.new("Frame",mf)
-inf.Size = UDim2.new(1,-12,0,36); inf.Position = UDim2.new(0,6,1,-44)
-inf.BackgroundColor3 = Color3.fromRGB(255,235,245); inf.BorderSizePixel = 0
-Instance.new("UICorner",inf).CornerRadius = UDim.new(0,10)
+local inf = Instance.new("Frame", mf)
+inf.Size = UDim2.new(1,-12,0,36)
+inf.Position = UDim2.new(0,6,1,-44)
+inf.BackgroundColor3 = Color3.fromRGB(255,235,245)
+inf.BorderSizePixel = 0
+Instance.new("UICorner", inf).CornerRadius = UDim.new(0,10)
 
-local ib = Instance.new("TextBox",inf)
-ib.Size = UDim2.new(0.67,-6,0.75,0); ib.Position = UDim2.new(0,6,0.125,0)
-ib.BackgroundColor3 = Color3.new(1,1,1); ib.PlaceholderText = "Type here..."
-ib.Text = ""; ib.TextColor3 = Color3.fromRGB(70,40,60)
-ib.Font = Enum.Font.Gotham; ib.TextSize = 13; ib.ClearTextOnFocus = true
-Instance.new("UICorner",ib).CornerRadius = UDim.new(0,8)
+local ib = Instance.new("TextBox", inf)
+ib.Size = UDim2.new(0.67,-6,0.75,0)
+ib.Position = UDim2.new(0,6,0.125,0)
+ib.BackgroundColor3 = Color3.new(1,1,1)
+ib.PlaceholderText = "Type here..."
+ib.Text = ""
+ib.TextColor3 = Color3.fromRGB(70,40,60)
+ib.Font = Enum.Font.Gotham
+ib.TextSize = 13
+ib.ClearTextOnFocus = false
+Instance.new("UICorner", ib).CornerRadius = UDim.new(0,8)
 
-local sb = Instance.new("TextButton",inf)
-sb.Size = UDim2.new(0.29,0,0.75,0); sb.Position = UDim2.new(0.69,4,0.125,0)
-sb.BackgroundColor3 = Color3.fromRGB(255,130,175); sb.Text = "Send"
+local sb = Instance.new("TextButton", inf)
+sb.Size = UDim2.new(0.29,0,0.75,0)
+sb.Position = UDim2.new(0.69,4,0.125,0)
+sb.BackgroundColor3 = Color3.fromRGB(255,130,175)
+sb.Text = "Send"
 sb.TextColor3 = Color3.new(1,1,1)
-sb.Font = Enum.Font.GothamBold; sb.TextSize = 13
-Instance.new("UICorner",sb).CornerRadius = UDim.new(0,8)
+sb.Font = Enum.Font.GothamBold
+sb.TextSize = 13
+Instance.new("UICorner", sb).CornerRadius = UDim.new(0,8)
 
-addToLog = function(sender,text,isMorse,isMove)
-    local f = Instance.new("Frame",logFrame)
-    f.Size = UDim2.new(1,-6,0,0); f.AutomaticSize = Enum.AutomaticSize.Y
+addToLog = function(sender, text, isMorse, isMove)
+    local f = Instance.new("Frame", logFrame)
+    f.Size = UDim2.new(1,-6,0,0)
+    f.AutomaticSize = Enum.AutomaticSize.Y
     f.BackgroundTransparency = 1
-    local l = Instance.new("TextLabel",f)
-    l.Size = UDim2.new(1,0,0,0); l.AutomaticSize = Enum.AutomaticSize.Y
-    l.BackgroundTransparency = 1; l.TextWrapped = true
+    local l = Instance.new("TextLabel", f)
+    l.Size = UDim2.new(1,0,0,0)
+    l.AutomaticSize = Enum.AutomaticSize.Y
+    l.BackgroundTransparency = 1
+    l.TextWrapped = true
     l.TextXAlignment = Enum.TextXAlignment.Left
-    l.RichText = true; l.Font = Enum.Font.Gotham; l.TextSize = 13
+    l.RichText = true
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 13
     if isMove then
-        l.Text = string.format('<font color="#9B59B6">%s 🕹️:</font> <font color="#27AE60">%s</font>',sender,text)
+        l.Text = string.format('<font color="#9B59B6">%s:</font> <font color="#27AE60">%s</font>', sender, text)
     elseif isMorse then
-        l.Text = string.format('<font color="#FF6B9D">%s:</font> <font color="#4ECDC4">%s</font> <font color="#C89EC0">(%s)</font>',sender,fromMorse(text),text)
+        l.Text = string.format('<font color="#FF6B9D">%s:</font> <font color="#4ECDC4">%s</font> <font color="#C89EC0">(%s)</font>', sender, fromMorse(text), text)
     else
-        l.Text = string.format('<font color="#FF6B9D">%s:</font> %s',sender,text)
+        l.Text = string.format('<font color="#FF6B9D">%s:</font> %s', sender, text)
     end
-    task.defer(function() logFrame.CanvasPosition = Vector2.new(0,logFrame.AbsoluteCanvasSize.Y) end)
+    task.defer(function()
+        logFrame.CanvasPosition = Vector2.new(0, logFrame.AbsoluteCanvasSize.Y)
+    end)
 end
 
 local mode = "morse"
+
 local function setMode(m)
     mode = m
     if m == "morse" then
-        morseTab.BackgroundColor3 = Color3.fromRGB(255,130,175); morseTab.TextColor3 = Color3.new(1,1,1)
-        bodyTab.BackgroundColor3 = Color3.fromRGB(220,200,230); bodyTab.TextColor3 = Color3.fromRGB(140,80,160)
-        sb.BackgroundColor3 = Color3.fromRGB(255,130,175); hint.Visible = false
+        morseTab.BackgroundColor3 = Color3.fromRGB(255,130,175)
+        morseTab.TextColor3 = Color3.new(1,1,1)
+        bodyTab.BackgroundColor3 = Color3.fromRGB(220,200,230)
+        bodyTab.TextColor3 = Color3.fromRGB(140,80,160)
+        sb.BackgroundColor3 = Color3.fromRGB(255,130,175)
+        hint.Visible = false
         ib.PlaceholderText = "Type to send morse..."
     else
-        bodyTab.BackgroundColor3 = Color3.fromRGB(160,100,210); bodyTab.TextColor3 = Color3.new(1,1,1)
-        morseTab.BackgroundColor3 = Color3.fromRGB(220,200,230); morseTab.TextColor3 = Color3.fromRGB(160,90,130)
-        sb.BackgroundColor3 = Color3.fromRGB(160,100,210); hint.Visible = true
+        bodyTab.BackgroundColor3 = Color3.fromRGB(160,100,210)
+        bodyTab.TextColor3 = Color3.new(1,1,1)
+        morseTab.BackgroundColor3 = Color3.fromRGB(220,200,230)
+        morseTab.TextColor3 = Color3.fromRGB(160,90,130)
+        sb.BackgroundColor3 = Color3.fromRGB(160,100,210)
+        hint.Visible = true
         ib.PlaceholderText = "Type to body-morse..."
     end
 end
+
 morseTab.MouseButton1Click:Connect(function() setMode("morse") end)
 bodyTab.MouseButton1Click:Connect(function() setMode("body") end)
 
-local drag,ds,sp = false,nil,nil
+local drag, ds, sp = false, nil, nil
 mf.Active = true
 tb.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        drag=true; ds=i.Position; sp=mf.Position
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = true
+        ds = i.Position
+        sp = mf.Position
         i.Changed:Connect(function()
-            if i.UserInputState==Enum.UserInputState.End then drag=false end
+            if i.UserInputState == Enum.UserInputState.End then drag = false end
         end)
     end
 end)
 tb.InputChanged:Connect(function(i)
-    if drag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
-        local d=i.Position-ds
-        mf.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - ds
+        mf.Position = UDim2.new(sp.X.Scale, sp.X.Offset+d.X, sp.Y.Scale, sp.Y.Offset+d.Y)
     end
 end)
 
@@ -475,52 +549,77 @@ local hidden = false
 hideBtn.MouseButton1Click:Connect(function()
     hidden = not hidden
     if hidden then
-        logFrame.Visible=false; inf.Visible=false; mb.Visible=false; hint.Visible=false
-        mf.Size=UDim2.new(0,220,0,34); mf.BackgroundTransparency=1
-        stroke.Thickness=0; hideBtn.Text="▲"
+        logFrame.Visible = false
+        inf.Visible = false
+        mb.Visible = false
+        hint.Visible = false
+        mf.Size = UDim2.new(0,220,0,34)
+        mf.BackgroundTransparency = 1
+        stroke.Thickness = 0
+        hideBtn.Text = "^"
     else
-        logFrame.Visible=true; inf.Visible=true; mb.Visible=true
-        if mode=="body" then hint.Visible=true end
-        mf.Size=UDim2.new(0,220,0,290); mf.BackgroundTransparency=0
-        stroke.Thickness=1.5; hideBtn.Text="▼"
+        logFrame.Visible = true
+        inf.Visible = true
+        mb.Visible = true
+        if mode == "body" then hint.Visible = true end
+        mf.Size = UDim2.new(0,220,0,290)
+        mf.BackgroundTransparency = 0
+        stroke.Thickness = 1.5
+        hideBtn.Text = "v"
     end
 end)
-closeBtn.MouseButton1Click:Connect(function() sg:Destroy() end)
+
+closeBtn.MouseButton1Click:Connect(function()
+    sg:Destroy()
+end)
 
 local function doSend()
-    local msg=ib.Text; if msg=="" then return end; ib.Text=""
-    if mode=="morse" then
-        local mm=toMorse(msg)
+    local msg = ib.Text:match("^%s*(.-)%s*$")
+    if msg == "" then return end
+    ib.Text = ""
+    if mode == "morse" then
+        local mm = toMorse(msg)
         pcall(function()
             if TextChatService.TextChannels and TextChatService.TextChannels:FindFirstChild("RBXGeneral") then
                 TextChatService.TextChannels.RBXGeneral:SendAsync(mm)
             else
-                game.ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents").SayMessageRequest:FireServer(mm,"All")
+                game.ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents").SayMessageRequest:FireServer(mm, "All")
             end
         end)
-        addToLog(player.Name.." (You)",msg,false,false)
+        addToLog(player.Name .. " (You)", msg, false, false)
     else
         startSelfWatch()
-        task.spawn(function() bodyMorseSend(msg) end)
+        task.spawn(function()
+            bodyMorseSend(msg)
+        end)
     end
 end
+
 sb.MouseButton1Click:Connect(doSend)
-ib.FocusLost:Connect(function(e) if e then doSend() end end)
+
+ib.FocusLost:Connect(function()
+    -- intentionally empty, Enter does nothing
+end)
 
 local function onMsg(m)
     if not m.Text then return end
-    local who=(m.TextSource and m.TextSource.Name) or "?"
-    if looksLikeMorse(m.Text) then addToLog(who,m.Text,true,false)
-    else addToLog(who,m.Text,false,false) end
+    local who = (m.TextSource and m.TextSource.Name) or "?"
+    if looksLikeMorse(m.Text) then
+        addToLog(who, m.Text, true, false)
+    else
+        addToLog(who, m.Text, false, false)
+    end
 end
+
 if TextChatService.TextChannels then
     TextChatService.MessageReceived:Connect(onMsg)
 end
+
 pcall(function()
     game.ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents")
-    .OnMessageDoneFiltering.OnClientEvent:Connect(function(d)
-        onMsg({Text=d.Message,TextSource={Name=d.FromSpeaker}})
-    end)
+        .OnMessageDoneFiltering.OnClientEvent:Connect(function(d)
+            onMsg({Text = d.Message, TextSource = {Name = d.FromSpeaker}})
+        end)
 end)
 
-print("🌸 Body Morse ready! SIT first to arm · Jump=dot · Sit=dash · 5s silence=done")
+print("Catbar Morse loaded - Lay=dot Sit=dash - Send button only")
